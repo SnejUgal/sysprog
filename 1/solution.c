@@ -16,38 +16,47 @@
 struct task {
     char* filepath;
     struct vec result;
+};
 
+struct queue {
+    struct task* tasks;
+    size_t tasks_count;
+    size_t next_task;
+};
+
+struct worker {
+    struct queue* queue;
     long quantum;
     long work_time;
     struct timespec resumed_at;
     size_t switches;
 };
 
-void start_timer(struct task* task) {
-    clock_gettime(CLOCK_MONOTONIC, &task->resumed_at);
-}
-
 long time_between(struct timespec* end, struct timespec* start) {
     return (end->tv_sec - start->tv_sec) * NS_PER_S +
            (end->tv_nsec - start->tv_nsec);
 }
 
-void pause_timer(struct task* task) {
-    struct timespec now;
-    clock_gettime(CLOCK_MONOTONIC, &now);
-    task->work_time += time_between(&now, &task->resumed_at);
+void start_timer(struct worker* worker) {
+    clock_gettime(CLOCK_MONOTONIC, &worker->resumed_at);
 }
 
-void yield(struct task* task) {
+void pause_timer(struct worker* worker) {
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    worker->work_time += time_between(&now, &worker->resumed_at);
+}
+
+void yield(struct worker* worker) {
     struct timespec now;
     clock_gettime(CLOCK_MONOTONIC, &now);
 
-    long time_spent = time_between(&now, &task->resumed_at);
-    if (time_spent > task->quantum) {
-        task->work_time += time_spent;
+    long time_spent = time_between(&now, &worker->resumed_at);
+    if (time_spent > worker->quantum) {
+        worker->work_time += time_spent;
         coro_yield();
-        task->switches = coro_switch_count(coro_this());
-        start_timer(task);
+        worker->switches = coro_switch_count(coro_this());
+        start_timer(worker);
     }
 }
 
@@ -99,7 +108,7 @@ void build_heap(struct vec* numbers) {
     }
 }
 
-void heapsort(struct task* task) {
+void heapsort(struct task* task, struct worker* worker) {
     if (task->result.length <= 1) {
         return;
     }
@@ -112,70 +121,76 @@ void heapsort(struct task* task) {
         --heap_end;
         sift_down(&task->result, 0, heap_end);
 
-        yield(task);
+        yield(worker);
     }
 }
 
-static int coroutine_func_f(void* context) {
-    struct task* task = context;
-    start_timer(task);
+static int worker(void* context) {
+    struct worker* worker = context;
+    start_timer(worker);
 
-    FILE* file = fopen(task->filepath, "r");
-    if (file == NULL) {
-        perror("Failed to open file");
-        pause_timer(task);
-        return 1;
+    struct queue* queue = worker->queue;
+    while (queue->next_task != queue->tasks_count) {
+        struct task* task = &queue->tasks[queue->next_task];
+        ++queue->next_task;
+
+        FILE* file = fopen(task->filepath, "r");
+        if (file == NULL) {
+            perror("Failed to open file");
+            continue;
+        }
+
+        int number;
+        while (fscanf(file, "%d", &number) == 1) {
+            vec_push(&task->result, &number);
+        }
+        heapsort(task, worker);
+        fclose(file);
     }
 
-    int number;
-    while (fscanf(file, "%d", &number) == 1) {
-        vec_push(&task->result, &number);
-    }
-    heapsort(task);
-
-    pause_timer(task);
+    pause_timer(worker);
     return 0;
 }
 
-void free_tasks(struct vec* tasks) {
-    struct task* elements = tasks->elements;
-    for (size_t i = 0; i < tasks->length; ++i) {
-        vec_free(&elements[i].result);
+void free_queue(struct queue* queue) {
+    for (size_t i = 0; i < queue->tasks_count; ++i) {
+        vec_free(&queue->tasks[i].result);
     }
-    vec_free(tasks);
+    free(queue->tasks);
 }
 
-void merge_results(struct vec* tasks_vec, FILE* output) {
-    struct task* tasks = tasks_vec->elements;
-
-    struct vec positions_vec =
-        vec_with_capacity(tasks_vec->length, sizeof(size_t));
-    memset(positions_vec.elements, 0, tasks_vec->length * sizeof(size_t));
-    positions_vec.length = tasks_vec->length;
-    size_t* positions = positions_vec.elements;
+void merge_results(struct queue* queue, FILE* output) {
+    size_t* positions = calloc(queue->tasks_count, sizeof(size_t));
+    if (positions == NULL) {
+        puts("Failed to allocate memory");
+        exit(2);
+    }
 
     while (true) {
         int min_element = INT_MIN;
-        size_t min_from = tasks_vec->length;
-        for (size_t i = 0; i < tasks_vec->length; ++i) {
-            if (positions[i] == tasks[i].result.length) {
+        size_t min_from = queue->tasks_count;
+        for (size_t i = 0; i < queue->tasks_count; ++i) {
+            if (positions[i] == queue->tasks[i].result.length) {
                 continue;
             }
 
-            int this_element = ((int*)tasks[i].result.elements)[positions[i]];
-            if (min_from == tasks_vec->length || min_element > this_element) {
+            int this_element =
+                ((int*)queue->tasks[i].result.elements)[positions[i]];
+            if (min_from == queue->tasks_count || min_element > this_element) {
                 min_element = this_element;
                 min_from = i;
             }
         }
-        if (min_from == tasks_vec->length) {
+        if (min_from == queue->tasks_count) {
             break;
         }
 
         ++positions[min_from];
         fprintf(output, "%d ", min_element);
     }
+
     fflush(output);
+    free(positions);
 }
 
 uintmax_t parse_integer(char* string, uintmax_t max_value) {
@@ -189,12 +204,15 @@ uintmax_t parse_integer(char* string, uintmax_t max_value) {
 }
 
 int main(int argc, char** argv) {
-    if (argc < 2) {
+    if (argc < 3) {
         char* name = (argc > 0) ? argv[0] : "./a.out";
-        printf("Usage: %s target_latency files...\n", name);
+        printf("Usage: %s target_latency workers files...\n", name);
         return 1;
     }
+    size_t files_count = argc - 3;
     long target_latency = (long)parse_integer(argv[1], LONG_MAX);
+    long quantum = target_latency * NS_PER_US / files_count;
+    size_t workers_count = (size_t)parse_integer(argv[2], SIZE_MAX);
 
     FILE* output = fopen("output.txt", "w");
     if (output == NULL) {
@@ -202,49 +220,55 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    struct queue queue = {
+        .tasks = calloc(files_count, sizeof(struct task)),
+        .tasks_count = files_count,
+        .next_task = 0,
+    };
+    if (queue.tasks == NULL) {
+        puts("Failed to allocate memory for tasks");
+        fclose(output);
+        return 2;
+    }
+    for (size_t i = 0; i < files_count; ++i) {
+        queue.tasks[i].filepath = argv[i + 3];
+        queue.tasks[i].result = vec_new(sizeof(int));
+    }
+
     coro_sched_init();
+    struct worker* workers = calloc(workers_count, sizeof(struct worker));
+    if (workers == NULL) {
+        puts("Failed to allocate memory for workers");
+        free_queue(&queue);
+        fclose(output);
+        return 2;
+    }
+    for (size_t i = 0; i < workers_count; ++i) {
+        workers[i].queue = &queue;
+        workers[i].quantum = quantum;
+        workers[i].work_time = 0;
+        workers[i].switches = 0;
 
-    size_t files = argc - 2;
-    long quantum = target_latency * NS_PER_US / files;
-
-    struct vec tasks = vec_with_capacity(files, sizeof(struct task));
-    for (size_t i = 0; i < files; ++i) {
-        struct task task = {.filepath = argv[i + 2],
-                            .result = vec_new(sizeof(int)),
-                            .quantum = quantum,
-                            .work_time = 0,
-                            .switches = 0};
-        vec_push(&tasks, &task);
-
-        coro_new(coroutine_func_f, &((struct task*)tasks.elements)[i]);
+        coro_new(worker, &workers[i]);
     }
 
-    /* Wait for the couritines */
     struct coro* c;
-    bool has_failed = false;
     while ((c = coro_sched_wait()) != NULL) {
-        if (coro_status(c) != 0) {
-            has_failed = true;
-        }
         coro_delete(c);
-    }
-    if (has_failed) {
-        free_tasks(&tasks);
-        printf("Exiting because some courotines failed");
-        return 1;
     }
 
     long total_work_time = 0;
-    for (size_t i = 0; i < tasks.length; ++i) {
-        struct task* task = &((struct task*)tasks.elements)[i];
-        total_work_time += task->work_time;
+    for (size_t i = 0; i < workers_count; ++i) {
+        total_work_time += workers[i].work_time;
         printf("Coroutine %zu: worked for %fms, switched %zu times\n", i,
-               (double)task->work_time / NS_PER_MS, task->switches);
+               (double)workers[i].work_time / NS_PER_MS, workers[i].switches);
     }
     printf("Total work time: %fms\n", (double)total_work_time / NS_PER_MS);
 
-    merge_results(&tasks, output);
+    merge_results(&queue, output);
 
-    free_tasks(&tasks);
+    free(workers);
+    free_queue(&queue);
+    fclose(output);
     return 0;
 }
