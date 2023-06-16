@@ -12,6 +12,31 @@
 #define NS_PER_MS 1e6
 #define NS_PER_US 1e3
 
+/* Utilities */
+
+uintmax_t parse_integer_argument(char* string, uintmax_t max_value) {
+    char* end;
+    uintmax_t result = strtoumax(string, &end, 10);
+    if (result > max_value || *end != '\0') {
+        printf("error: %s is not a valid integer\n", string);
+        exit(1);
+    }
+    return result;
+}
+
+long time_between(struct timespec* end, struct timespec* start) {
+    return (end->tv_sec - start->tv_sec) * NS_PER_S +
+           (end->tv_nsec - start->tv_nsec);
+}
+
+void swap(int* a, int* b) {
+    int temp = *a;
+    *a = *b;
+    *b = temp;
+}
+
+/* Workers */
+
 struct task {
     char* filepath;
     int* numbers;
@@ -24,6 +49,32 @@ struct queue {
     size_t next_task;
 };
 
+struct queue init_queue(char** filepaths, size_t tasks_count) {
+    struct queue queue = {
+        .tasks = calloc(tasks_count, sizeof(struct task)),
+        .tasks_count = tasks_count,
+        .next_task = 0,
+    };
+    if (queue.tasks == NULL) {
+        puts("Failed to allocate memory for tasks");
+        exit(2);
+    }
+    for (size_t i = 0; i < tasks_count; ++i) {
+        queue.tasks[i].filepath = filepaths[i];
+        queue.tasks[i].numbers = NULL;
+        queue.tasks[i].numbers_count = 0;
+    }
+
+    return queue;
+}
+
+void free_queue(struct queue* queue) {
+    for (size_t i = 0; i < queue->tasks_count; ++i) {
+        free(queue->tasks[i].numbers);
+    }
+    free(queue->tasks);
+}
+
 struct worker {
     struct queue* queue;
     long quantum;
@@ -31,11 +82,6 @@ struct worker {
     struct timespec resumed_at;
     size_t switches;
 };
-
-long time_between(struct timespec* end, struct timespec* start) {
-    return (end->tv_sec - start->tv_sec) * NS_PER_S +
-           (end->tv_nsec - start->tv_nsec);
-}
 
 void start_timer(struct worker* worker) {
     clock_gettime(CLOCK_MONOTONIC, &worker->resumed_at);
@@ -60,11 +106,28 @@ void yield(struct worker* worker) {
     }
 }
 
-void swap(int* a, int* b) {
-    int temp = *a;
-    *a = *b;
-    *b = temp;
+static int worker(void* context);
+
+struct worker* init_workers(size_t workers_count, struct queue* queue,
+                            long target_latency) {
+    long quantum = target_latency * NS_PER_US / workers_count;
+    struct worker* workers = calloc(workers_count, sizeof(struct worker));
+    if (workers == NULL) {
+        puts("Failed to allocate memory for workers");
+        exit(2);
+    }
+    for (size_t i = 0; i < workers_count; ++i) {
+        workers[i].queue = queue;
+        workers[i].quantum = quantum;
+        workers[i].work_time = 0;
+        workers[i].switches = 0;
+
+        coro_new(worker, &workers[i]);
+    }
+    return workers;
 }
+
+/* Processing */
 
 size_t get_parent_index(size_t child) { return (child - 1) / 2; }
 size_t get_left_child_index(size_t parent) { return parent * 2 + 1; }
@@ -152,13 +215,6 @@ static int worker(void* context) {
     return 0;
 }
 
-void free_queue(struct queue* queue) {
-    for (size_t i = 0; i < queue->tasks_count; ++i) {
-        free(queue->tasks[i].numbers);
-    }
-    free(queue->tasks);
-}
-
 void merge_results(struct queue* queue, FILE* output) {
     size_t* positions = calloc(queue->tasks_count, sizeof(size_t));
     if (positions == NULL) {
@@ -192,14 +248,15 @@ void merge_results(struct queue* queue, FILE* output) {
     free(positions);
 }
 
-uintmax_t parse_integer(char* string, uintmax_t max_value) {
-    char* end;
-    uintmax_t result = strtoumax(string, &end, 10);
-    if (result > max_value || *end != '\0') {
-        printf("error: %s is not a valid integer\n", string);
-        exit(1);
+void print_stats(struct worker* workers, size_t workers_count,
+                 struct timespec* start, struct timespec* end) {
+    printf("Total work time: %fms\n",
+           (double)time_between(end, start) / NS_PER_MS);
+
+    for (size_t i = 0; i < workers_count; ++i) {
+        printf("Coroutine %zu: worked for %fms, switched %zu times\n", i,
+               (double)workers[i].work_time / NS_PER_MS, workers[i].switches);
     }
-    return result;
 }
 
 int main(int argc, char** argv) {
@@ -209,9 +266,11 @@ int main(int argc, char** argv) {
         return 1;
     }
     size_t files_count = argc - 3;
-    long target_latency = (long)parse_integer(argv[1], LONG_MAX);
-    long quantum = target_latency * NS_PER_US / files_count;
-    size_t workers_count = (size_t)parse_integer(argv[2], SIZE_MAX);
+    long target_latency = (long)parse_integer_argument(argv[1], LONG_MAX);
+    size_t workers_count = (size_t)parse_integer_argument(argv[2], SIZE_MAX);
+
+    struct timespec start;
+    clock_gettime(CLOCK_MONOTONIC, &start);
 
     FILE* output = fopen("output.txt", "w");
     if (output == NULL) {
@@ -219,56 +278,24 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    struct queue queue = {
-        .tasks = calloc(files_count, sizeof(struct task)),
-        .tasks_count = files_count,
-        .next_task = 0,
-    };
-    if (queue.tasks == NULL) {
-        puts("Failed to allocate memory for tasks");
-        fclose(output);
-        return 2;
-    }
-    for (size_t i = 0; i < files_count; ++i) {
-        queue.tasks[i].filepath = argv[i + 3];
-        queue.tasks[i].numbers = NULL;
-        queue.tasks[i].numbers_count = 0;
-    }
-
     coro_sched_init();
-    struct worker* workers = calloc(workers_count, sizeof(struct worker));
-    if (workers == NULL) {
-        puts("Failed to allocate memory for workers");
-        free_queue(&queue);
-        fclose(output);
-        return 2;
-    }
-    for (size_t i = 0; i < workers_count; ++i) {
-        workers[i].queue = &queue;
-        workers[i].quantum = quantum;
-        workers[i].work_time = 0;
-        workers[i].switches = 0;
-
-        coro_new(worker, &workers[i]);
-    }
+    struct queue queue = init_queue(argv + 3, files_count);
+    struct worker* workers =
+        init_workers(workers_count, &queue, target_latency);
 
     struct coro* c;
     while ((c = coro_sched_wait()) != NULL) {
         coro_delete(c);
     }
 
-    long total_work_time = 0;
-    for (size_t i = 0; i < workers_count; ++i) {
-        total_work_time += workers[i].work_time;
-        printf("Coroutine %zu: worked for %fms, switched %zu times\n", i,
-               (double)workers[i].work_time / NS_PER_MS, workers[i].switches);
-    }
-    printf("Total work time: %fms\n", (double)total_work_time / NS_PER_MS);
-
     merge_results(&queue, output);
+    fclose(output);
+
+    struct timespec end;
+    clock_gettime(CLOCK_MONOTONIC, &end);
+    print_stats(workers, workers_count, &start, &end);
 
     free(workers);
     free_queue(&queue);
-    fclose(output);
     return 0;
 }
