@@ -7,7 +7,6 @@
 #include <time.h>
 
 #include "libcoro.h"
-#include "vec.h"
 
 #define NS_PER_S 1e9
 #define NS_PER_MS 1e6
@@ -15,7 +14,8 @@
 
 struct task {
     char* filepath;
-    struct vec result;
+    int* numbers;
+    size_t numbers_count;
 };
 
 struct queue {
@@ -70,20 +70,18 @@ size_t get_parent_index(size_t child) { return (child - 1) / 2; }
 size_t get_left_child_index(size_t parent) { return parent * 2 + 1; }
 size_t get_right_child_index(size_t parent) { return parent * 2 + 2; }
 
-void sift_down(struct vec* numbers, size_t start, size_t heap_end) {
-    int* elements = numbers->elements;
-
+void sift_down(int* numbers, size_t start, size_t heap_end) {
     size_t root = start;
     while (get_left_child_index(root) <= heap_end) {
         size_t max = root;
 
         size_t left_child = get_left_child_index(root);
-        if (elements[left_child] > elements[max]) {
+        if (numbers[left_child] > numbers[max]) {
             max = left_child;
         }
 
         size_t right_child = get_right_child_index(root);
-        if (right_child <= heap_end && elements[right_child] > elements[max]) {
+        if (right_child <= heap_end && numbers[right_child] > numbers[max]) {
             max = right_child;
         }
 
@@ -91,13 +89,12 @@ void sift_down(struct vec* numbers, size_t start, size_t heap_end) {
             break;
         }
 
-        swap(&elements[root], &elements[max]);
+        swap(&numbers[root], &numbers[max]);
         root = max;
     }
 }
 
-void build_heap(struct vec* numbers) {
-    size_t heap_end = numbers->length - 1;
+void build_heap(int* numbers, size_t heap_end) {
     size_t parent = get_parent_index(heap_end);
     while (true) {
         sift_down(numbers, parent, heap_end);
@@ -109,17 +106,17 @@ void build_heap(struct vec* numbers) {
 }
 
 void heapsort(struct task* task, struct worker* worker) {
-    if (task->result.length <= 1) {
+    if (task->numbers_count <= 1) {
         return;
     }
-    build_heap(&task->result);
 
-    int* elements = task->result.elements;
-    size_t heap_end = task->result.length - 1;
+    size_t heap_end = task->numbers_count - 1;
+    build_heap(task->numbers, heap_end);
+
     while (heap_end > 0) {
-        swap(&elements[0], &elements[heap_end]);
+        swap(&task->numbers[0], &task->numbers[heap_end]);
         --heap_end;
-        sift_down(&task->result, 0, heap_end);
+        sift_down(task->numbers, 0, heap_end);
 
         yield(worker);
     }
@@ -142,7 +139,10 @@ static int worker(void* context) {
 
         int number;
         while (fscanf(file, "%d", &number) == 1) {
-            vec_push(&task->result, &number);
+            task->numbers = reallocarray(task->numbers, task->numbers_count + 1,
+                                         sizeof(int));
+            task->numbers[task->numbers_count] = number;
+            ++task->numbers_count;
         }
         heapsort(task, worker);
         fclose(file);
@@ -154,7 +154,7 @@ static int worker(void* context) {
 
 void free_queue(struct queue* queue) {
     for (size_t i = 0; i < queue->tasks_count; ++i) {
-        vec_free(&queue->tasks[i].result);
+        free(queue->tasks[i].numbers);
     }
     free(queue->tasks);
 }
@@ -170,12 +170,11 @@ void merge_results(struct queue* queue, FILE* output) {
         int min_element = INT_MIN;
         size_t min_from = queue->tasks_count;
         for (size_t i = 0; i < queue->tasks_count; ++i) {
-            if (positions[i] == queue->tasks[i].result.length) {
+            if (positions[i] == queue->tasks[i].numbers_count) {
                 continue;
             }
 
-            int this_element =
-                ((int*)queue->tasks[i].result.elements)[positions[i]];
+            int this_element = queue->tasks[i].numbers[positions[i]];
             if (min_from == queue->tasks_count || min_element > this_element) {
                 min_element = this_element;
                 min_from = i;
@@ -232,7 +231,8 @@ int main(int argc, char** argv) {
     }
     for (size_t i = 0; i < files_count; ++i) {
         queue.tasks[i].filepath = argv[i + 3];
-        queue.tasks[i].result = vec_new(sizeof(int));
+        queue.tasks[i].numbers = NULL;
+        queue.tasks[i].numbers_count = 0;
     }
 
     coro_sched_init();
