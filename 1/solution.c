@@ -168,7 +168,7 @@ void build_heap(int* numbers, size_t heap_end) {
     }
 }
 
-void heapsort(struct task* task, struct worker* worker) {
+void heap_sort(struct task* task, struct worker* worker) {
     if (task->numbers_count <= 1) {
         return;
     }
@@ -202,12 +202,12 @@ static int worker(void* context) {
 
         int number;
         while (fscanf(file, "%d", &number) == 1) {
-            task->numbers = reallocarray(task->numbers, task->numbers_count + 1,
-                                         sizeof(int));
+            task->numbers =
+                realloc(task->numbers, (task->numbers_count + 1) * sizeof(int));
             task->numbers[task->numbers_count] = number;
             ++task->numbers_count;
         }
-        heapsort(task, worker);
+        heap_sort(task, worker);
         fclose(file);
     }
 
