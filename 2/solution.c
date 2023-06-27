@@ -113,6 +113,7 @@ exit:
 #ifdef PROMPT
     printf("exit\n");
 #endif
+    free(context.jobs);
     free(input);
     return context.last_exit_code;
 }
