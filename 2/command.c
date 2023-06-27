@@ -210,8 +210,8 @@ struct execution_result execute_pipeline(struct pipeline* pipeline,
             if (this_pipes.should_pipe_output) {
                 close(next_read_end);
             }
-            exit(execute_simple_command(&pipeline->commands[i], context,
-                                        &this_pipes));
+            _exit(execute_simple_command(&pipeline->commands[i], context,
+                                         &this_pipes));
         }
 
         children[i] = child;
@@ -301,7 +301,7 @@ struct execution_result execute_job_command(struct job_command* job,
         if (child == 0) {
             struct execution_result result =
                 execute_boolean_command(&job->command, context);
-            exit(result.exit_code);
+            _exit(result.exit_code);
         }
 
         context->jobs =
