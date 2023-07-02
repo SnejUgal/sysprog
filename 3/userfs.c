@@ -51,6 +51,8 @@ static struct file* file_list = NULL;
 
 struct filedesc {
     struct file* file;
+    struct block* current_block;
+    int offset_in_block;
 };
 
 /**
@@ -115,6 +117,13 @@ void delete_file(struct file* file) {
     file->next = NULL;
 
     if (file->refs == 0) {
+        struct block* current = file->block_list;
+        while (current != NULL) {
+            struct block* next = current->next;
+            free(current->memory);
+            free(current);
+            current = next;
+        }
         free(file);
     }
 }
@@ -158,10 +167,52 @@ void allocate_filedesc(int fd, struct file* file) {
     }
 
     filedesc->file = file;
+    filedesc->current_block = file->block_list;
+    filedesc->offset_in_block = 0;
 
     file_descriptors[fd] = filedesc;
     ++file_descriptor_count;
     ++file->refs;
+}
+
+struct filedesc* get_filedesc(int fd) {
+    if (fd < 0 || fd >= file_descriptor_capacity ||
+        file_descriptors[fd] == NULL) {
+        ufs_error_code = UFS_ERR_NO_FILE;
+        return NULL;
+    }
+
+    return file_descriptors[fd];
+}
+
+void allocate_block(struct filedesc* filedesc) {
+    struct block* new_block = malloc(sizeof(struct block));
+    if (new_block == NULL) {
+        ufs_error_code = UFS_ERR_NO_MEM;
+        return;
+    }
+
+    new_block->memory = malloc(BLOCK_SIZE);
+    if (new_block->memory == NULL) {
+        ufs_error_code = UFS_ERR_NO_MEM;
+        free(new_block);
+        return;
+    }
+
+    new_block->occupied = 0;
+    new_block->next = NULL;
+
+    new_block->prev = filedesc->file->last_block;
+    if (filedesc->file->last_block != NULL) {
+        filedesc->file->last_block->next = new_block;
+    }
+    filedesc->file->last_block = new_block;
+    if (filedesc->file->block_list == NULL) {
+        filedesc->file->block_list = new_block;
+    }
+
+    filedesc->current_block = new_block;
+    filedesc->offset_in_block = 0;
 }
 
 void free_filedesc(int fd) {
@@ -206,31 +257,119 @@ int ufs_open(const char* filename, int flags) {
 }
 
 ssize_t ufs_write(int fd, const char* buf, size_t size) {
-    /* IMPLEMENT THIS FUNCTION */
-    (void)fd;
-    (void)buf;
-    (void)size;
-    ufs_error_code = UFS_ERR_NOT_IMPLEMENTED;
-    return -1;
+    ufs_error_code = UFS_ERR_NO_ERR;
+
+    struct filedesc* filedesc = get_filedesc(fd);
+    if (filedesc == NULL) {
+        return -1;
+    }
+
+    if (size == 0) {
+        return 0;
+    }
+
+    size_t written = 0;
+    while (true) {
+        if (filedesc->current_block == NULL) {
+            if (filedesc->file->block_list == NULL) {
+                allocate_block(filedesc);
+                if (ufs_error_code != UFS_ERR_NO_ERR) {
+                    break;
+                }
+            } else {
+                filedesc->current_block = filedesc->file->block_list;
+            }
+        }
+
+        size_t to_write = BLOCK_SIZE - filedesc->offset_in_block;
+        if (to_write > size - written) {
+            to_write = size - written;
+        }
+
+        memcpy(filedesc->current_block->memory + filedesc->offset_in_block,
+               buf + written, to_write);
+        written += to_write;
+        filedesc->offset_in_block += to_write;
+        if (filedesc->current_block->occupied <= filedesc->offset_in_block) {
+            filedesc->current_block->occupied = filedesc->offset_in_block;
+        }
+
+        if (written == size) {
+            break;
+        }
+        if (filedesc->current_block->next == NULL) {
+            allocate_block(filedesc);
+            if (ufs_error_code != UFS_ERR_NO_ERR) {
+                break;
+            }
+        } else {
+            filedesc->current_block = filedesc->current_block->next;
+            filedesc->offset_in_block = 0;
+        }
+    }
+
+    if (written == 0) {
+        return -1;
+    }
+
+    return written;
 }
 
 ssize_t ufs_read(int fd, char* buf, size_t size) {
-    /* IMPLEMENT THIS FUNCTION */
-    (void)fd;
-    (void)buf;
-    (void)size;
-    ufs_error_code = UFS_ERR_NOT_IMPLEMENTED;
-    return -1;
+    ufs_error_code = UFS_ERR_NO_ERR;
+
+    struct filedesc* filedesc = get_filedesc(fd);
+    if (filedesc == NULL) {
+        return -1;
+    }
+
+    if (size == 0) {
+        return 0;
+    }
+
+    size_t read = 0;
+    while (true) {
+        if (filedesc->current_block == NULL) {
+            if (filedesc->file->block_list == NULL) {
+                break;
+            }
+            filedesc->current_block = filedesc->file->block_list;
+        }
+
+        size_t to_read =
+            filedesc->current_block->occupied - filedesc->offset_in_block;
+        if (to_read > size - read) {
+            to_read = size - read;
+        }
+
+        memcpy(buf + read,
+               filedesc->current_block->memory + filedesc->offset_in_block,
+               to_read);
+        read += to_read;
+        filedesc->offset_in_block += to_read;
+
+        if (read == size) {
+            break;
+        }
+
+        if (filedesc->current_block->next == NULL) {
+            break;
+        }
+        filedesc->current_block = filedesc->current_block->next;
+        filedesc->offset_in_block = 0;
+    }
+
+    return read;
 }
 
 int ufs_close(int fd) {
     ufs_error_code = UFS_ERR_NO_ERR;
-    if (fd < 0 || fd >= file_descriptor_count || file_descriptors[fd] == NULL) {
-        ufs_error_code = UFS_ERR_NO_FILE;
+
+    if (get_filedesc(fd) == NULL) {
         return -1;
     }
-
     free_filedesc(fd);
+
     return 0;
 }
 
