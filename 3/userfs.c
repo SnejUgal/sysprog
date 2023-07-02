@@ -1,5 +1,10 @@
 #include "userfs.h"
+
+#include <limits.h>
+#include <stdbool.h>
 #include <stddef.h>
+#include <stdlib.h>
+#include <string.h>
 
 enum {
     BLOCK_SIZE = 512,
@@ -38,7 +43,7 @@ struct file {
     struct file* next;
     struct file* prev;
 
-    /* PUT HERE OTHER MEMBERS */
+    bool is_deleted;
 };
 
 /** List of all files. */
@@ -46,8 +51,6 @@ static struct file* file_list = NULL;
 
 struct filedesc {
     struct file* file;
-
-    /* PUT HERE OTHER MEMBERS */
 };
 
 /**
@@ -62,16 +65,144 @@ static int file_descriptor_capacity = 0;
 
 enum ufs_error_code ufs_errno() { return ufs_error_code; }
 
+struct file* find_file_by_name(const char* filename) {
+    struct file* current = file_list;
+    while (current != NULL) {
+        if (strcmp(current->name, filename) == 0) {
+            break;
+        }
+        current = current->next;
+    }
+
+    return current;
+}
+
+struct file* create_file(const char* filename) {
+    struct file* file = malloc(sizeof(struct file));
+    if (file == NULL) {
+        ufs_error_code = UFS_ERR_NO_MEM;
+        return NULL;
+    }
+
+    file->block_list = NULL;
+    file->last_block = NULL;
+    file->refs = 0;
+    file->name = strdup(filename);
+    file->prev = NULL;
+    file->is_deleted = false;
+
+    file->next = file_list;
+    if (file_list != NULL) {
+        file_list->prev = file;
+    }
+    file_list = file;
+
+    return file;
+}
+
+void delete_file(struct file* file) {
+    if (file_list == file) {
+        file_list = file->next;
+    }
+
+    if (file->prev != NULL) {
+        file->prev->next = file->next;
+    }
+    if (file->next != NULL) {
+        file->next->prev = file->prev;
+    }
+    file->prev = NULL;
+    file->next = NULL;
+
+    if (file->refs == 0) {
+        free(file);
+    }
+}
+
+int get_free_fd() {
+    int min_fd = 0;
+
+    if (file_descriptor_count == file_descriptor_capacity) {
+        long new_capacity = file_descriptor_capacity * 2;
+        if (new_capacity < 16) {
+            new_capacity = 16;
+        }
+        if (new_capacity > INT_MAX / 2) {
+            return -1;
+        }
+
+        struct filedesc** new_descriptors =
+            realloc(file_descriptors, sizeof(struct filedesc*) * new_capacity);
+        if (new_descriptors == NULL) {
+            ufs_error_code = UFS_ERR_NO_MEM;
+            return -1;
+        }
+
+        file_descriptor_capacity = new_capacity;
+        file_descriptors = new_descriptors;
+        min_fd = file_descriptor_count;
+    }
+
+    while (file_descriptors[min_fd] != NULL) {
+        ++min_fd;
+    }
+
+    return min_fd;
+}
+
+void allocate_filedesc(int fd, struct file* file) {
+    struct filedesc* filedesc = malloc(sizeof(struct filedesc));
+    if (filedesc == NULL) {
+        ufs_error_code = UFS_ERR_NO_MEM;
+        return;
+    }
+
+    filedesc->file = file;
+
+    file_descriptors[fd] = filedesc;
+    ++file_descriptor_count;
+    ++file->refs;
+}
+
+void free_filedesc(int fd) {
+    struct file* file = file_descriptors[fd]->file;
+    --file->refs;
+    if (file->refs == 0 && file->is_deleted == true) {
+        delete_file(file);
+    }
+
+    free(file_descriptors[fd]);
+    file_descriptors[fd] = NULL;
+    --file_descriptor_count;
+}
+
 int ufs_open(const char* filename, int flags) {
-    /* IMPLEMENT THIS FUNCTION */
-    (void)filename;
-    (void)flags;
-    (void)file_list;
-    (void)file_descriptors;
-    (void)file_descriptor_count;
-    (void)file_descriptor_capacity;
-    ufs_error_code = UFS_ERR_NOT_IMPLEMENTED;
-    return -1;
+    ufs_error_code = UFS_ERR_NO_ERR;
+
+    struct file* file = find_file_by_name(filename);
+    if (file == NULL) {
+        if ((flags & UFS_CREATE) == 0) {
+            ufs_error_code = UFS_ERR_NO_FILE;
+            return -1;
+        }
+
+        file = create_file(filename);
+        if (ufs_error_code != UFS_ERR_NO_ERR) {
+            return -1;
+        }
+    }
+
+    int free_fd = get_free_fd();
+    if (ufs_error_code != UFS_ERR_NO_ERR) {
+        return -1;
+    }
+
+    allocate_filedesc(free_fd, file);
+    if (ufs_error_code != UFS_ERR_NO_ERR) {
+        return -1;
+    }
+
+    return free_fd;
 }
 
 ssize_t ufs_write(int fd, const char* buf, size_t size) {
@@ -93,17 +224,28 @@ ssize_t ufs_read(int fd, char* buf, size_t size) {
 }
 
 int ufs_close(int fd) {
-    /* IMPLEMENT THIS FUNCTION */
-    (void)fd;
-    ufs_error_code = UFS_ERR_NOT_IMPLEMENTED;
-    return -1;
+    ufs_error_code = UFS_ERR_NO_ERR;
+    if (fd < 0 || fd >= file_descriptor_count || file_descriptors[fd] == NULL) {
+        ufs_error_code = UFS_ERR_NO_FILE;
+        return -1;
+    }
+
+    free_filedesc(fd);
+    return 0;
 }
 
 int ufs_delete(const char* filename) {
-    /* IMPLEMENT THIS FUNCTION */
-    (void)filename;
-    ufs_error_code = UFS_ERR_NOT_IMPLEMENTED;
-    return -1;
+    ufs_error_code = UFS_ERR_NO_ERR;
+
+    struct file* file = find_file_by_name(filename);
+    if (file == NULL) {
+        ufs_error_code = UFS_ERR_NO_FILE;
+        return -1;
+    }
+
+    file->is_deleted = true;
+    delete_file(file);
+    return 0;
 }
 
 void ufs_destroy(void) {}
