@@ -43,6 +43,7 @@ struct file {
     struct file* next;
     struct file* prev;
 
+    size_t block_count;
     bool is_deleted;
 };
 
@@ -92,6 +93,7 @@ struct file* create_file(const char* filename) {
     file->name = strdup(filename);
     file->prev = NULL;
     file->is_deleted = false;
+    file->block_count = 0;
 
     file->next = file_list;
     if (file_list != NULL) {
@@ -186,6 +188,11 @@ struct filedesc* get_filedesc(int fd) {
 }
 
 void allocate_block(struct filedesc* filedesc) {
+    if (filedesc->file->block_count >= MAX_FILE_SIZE / BLOCK_SIZE) {
+        ufs_error_code = UFS_ERR_NO_MEM;
+        return;
+    }
+
     struct block* new_block = malloc(sizeof(struct block));
     if (new_block == NULL) {
         ufs_error_code = UFS_ERR_NO_MEM;
@@ -211,6 +218,7 @@ void allocate_block(struct filedesc* filedesc) {
         filedesc->file->block_list = new_block;
     }
 
+    ++filedesc->file->block_count;
     filedesc->current_block = new_block;
     filedesc->offset_in_block = 0;
 }
@@ -268,19 +276,19 @@ ssize_t ufs_write(int fd, const char* buf, size_t size) {
         return 0;
     }
 
+    if (filedesc->current_block == NULL) {
+        if (filedesc->file->block_list == NULL) {
+            allocate_block(filedesc);
+            if (ufs_error_code != UFS_ERR_NO_ERR) {
+                return -1;
+            }
+        } else {
+            filedesc->current_block = filedesc->file->block_list;
+        }
+    }
+
     size_t written = 0;
     while (true) {
-        if (filedesc->current_block == NULL) {
-            if (filedesc->file->block_list == NULL) {
-                allocate_block(filedesc);
-                if (ufs_error_code != UFS_ERR_NO_ERR) {
-                    break;
-                }
-            } else {
-                filedesc->current_block = filedesc->file->block_list;
-            }
-        }
-
         size_t to_write = BLOCK_SIZE - filedesc->offset_in_block;
         if (to_write > size - written) {
             to_write = size - written;
@@ -290,7 +298,7 @@ ssize_t ufs_write(int fd, const char* buf, size_t size) {
                buf + written, to_write);
         written += to_write;
         filedesc->offset_in_block += to_write;
-        if (filedesc->current_block->occupied <= filedesc->offset_in_block) {
+        if (filedesc->current_block->occupied < filedesc->offset_in_block) {
             filedesc->current_block->occupied = filedesc->offset_in_block;
         }
 
@@ -327,14 +335,15 @@ ssize_t ufs_read(int fd, char* buf, size_t size) {
         return 0;
     }
 
+    if (filedesc->current_block == NULL) {
+        if (filedesc->file->block_list == NULL) {
+            return 0;
+        }
+        filedesc->current_block = filedesc->file->block_list;
+    }
+
     size_t read = 0;
     while (true) {
-        if (filedesc->current_block == NULL) {
-            if (filedesc->file->block_list == NULL) {
-                break;
-            }
-            filedesc->current_block = filedesc->file->block_list;
-        }
 
         size_t to_read =
             filedesc->current_block->occupied - filedesc->offset_in_block;
