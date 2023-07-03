@@ -496,7 +496,9 @@ int ufs_resize(int fd, size_t new_size) {
 
     size_t target_block_count = new_size / BLOCK_SIZE;
     size_t target_block_occupied = new_size % BLOCK_SIZE;
-    if (target_block_occupied != 0) {
+    if (target_block_occupied == 0) {
+        target_block_occupied = BLOCK_SIZE;
+    } else {
         ++target_block_count;
     }
 
