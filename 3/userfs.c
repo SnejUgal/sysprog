@@ -18,7 +18,7 @@ struct block {
     /** Block memory. */
     char memory[BLOCK_SIZE];
     /** How many bytes are occupied. */
-    int occupied;
+    size_t occupied;
     /** Next block in the file. */
     struct block* next;
     /** Previous block in the file. */
@@ -57,7 +57,8 @@ struct filedesc {
     bool can_write;
 
     struct block* current_block;
-    int offset_in_block;
+    size_t nth_block;
+    size_t offset_in_block;
 };
 
 /**
@@ -106,33 +107,6 @@ struct file* create_file(const char* filename) {
     file_list = file;
 
     return file;
-}
-
-void delete_file(struct file* file) {
-    if (file_list == file) {
-        file_list = file->next;
-    }
-
-    if (file->prev != NULL) {
-        file->prev->next = file->next;
-    }
-    if (file->next != NULL) {
-        file->next->prev = file->prev;
-    }
-    file->prev = NULL;
-    file->next = NULL;
-
-    if (file->refs == 0) {
-        struct block* last_block = file->last_block;
-        while (last_block != NULL) {
-            struct block* previous = last_block->prev;
-            free(last_block);
-            last_block = previous;
-            --file->block_count;
-        }
-        free(file->name);
-        free(file);
-    }
 }
 
 int get_free_fd() {
@@ -199,6 +173,7 @@ void allocate_filedesc(int fd, struct file* file, int flags) {
     filedesc->can_read = can_read;
     filedesc->can_write = can_write;
     filedesc->current_block = file->block_list;
+    filedesc->nth_block = 0;
     filedesc->offset_in_block = 0;
 
     file_descriptors[fd] = filedesc;
@@ -216,8 +191,26 @@ struct filedesc* get_filedesc(int fd) {
     return file_descriptors[fd];
 }
 
-void allocate_block(struct filedesc* filedesc) {
-    if (filedesc->file->block_count >= MAX_FILE_SIZE / BLOCK_SIZE) {
+void fix_seek_past_end(struct filedesc* filedesc) {
+    if (filedesc->file->block_count == 0) {
+        filedesc->current_block = NULL;
+        filedesc->nth_block = 0;
+        filedesc->offset_in_block = 0;
+        return;
+    }
+
+    if (filedesc->nth_block > filedesc->file->block_count - 1) {
+        filedesc->current_block = filedesc->file->last_block;
+        filedesc->nth_block = filedesc->file->block_count - 1;
+    }
+
+    if (filedesc->offset_in_block > filedesc->current_block->occupied) {
+        filedesc->offset_in_block = filedesc->current_block->occupied;
+    }
+}
+
+void allocate_block(struct file* file) {
+    if (file->block_count >= MAX_FILE_SIZE / BLOCK_SIZE) {
         ufs_error_code = UFS_ERR_NO_MEM;
         return;
     }
@@ -231,18 +224,76 @@ void allocate_block(struct filedesc* filedesc) {
     new_block->occupied = 0;
     new_block->next = NULL;
 
-    new_block->prev = filedesc->file->last_block;
-    if (filedesc->file->last_block != NULL) {
-        filedesc->file->last_block->next = new_block;
+    new_block->prev = file->last_block;
+    if (file->last_block != NULL) {
+        file->last_block->next = new_block;
     }
-    filedesc->file->last_block = new_block;
-    if (filedesc->file->block_list == NULL) {
-        filedesc->file->block_list = new_block;
+    file->last_block = new_block;
+    if (file->block_list == NULL) {
+        file->block_list = new_block;
+    }
+    ++file->block_count;
+}
+
+void allocate_blocks(struct file* file, size_t count) {
+    for (size_t i = 0; i < count; ++i) {
+        allocate_block(file);
+        if (ufs_error_code != UFS_ERR_NO_ERR) {
+            return;
+        }
+    }
+}
+
+void free_blocks(struct file* file, size_t count) {
+    size_t freed = 0;
+    while (freed < count && file->last_block != NULL) {
+        struct block* previous = file->last_block->prev;
+        free(file->last_block);
+        --file->block_count;
+        ++freed;
+
+        file->last_block = previous;
+        if (previous == NULL) {
+            file->block_list = NULL;
+        } else {
+            previous->next = NULL;
+        }
+    }
+}
+
+void extend_file(struct filedesc* filedesc) {
+    allocate_block(filedesc->file);
+    if (ufs_error_code != UFS_ERR_NO_ERR) {
+        return;
     }
 
-    ++filedesc->file->block_count;
-    filedesc->current_block = new_block;
+    if (filedesc->file->block_count > 1) {
+        ++filedesc->nth_block;
+    }
+
+    filedesc->current_block = filedesc->file->last_block;
     filedesc->offset_in_block = 0;
+}
+
+void delete_file(struct file* file) {
+    if (file_list == file) {
+        file_list = file->next;
+    }
+
+    if (file->prev != NULL) {
+        file->prev->next = file->next;
+    }
+    if (file->next != NULL) {
+        file->next->prev = file->prev;
+    }
+    file->prev = NULL;
+    file->next = NULL;
+
+    if (file->refs == 0) {
+        free_blocks(file, file->block_count);
+        free(file->name);
+        free(file);
+    }
 }
 
 void free_filedesc(int fd) {
@@ -304,7 +355,7 @@ ssize_t ufs_write(int fd, const char* buf, size_t size) {
 
     if (filedesc->current_block == NULL) {
         if (filedesc->file->block_list == NULL) {
-            allocate_block(filedesc);
+            extend_file(filedesc);
             if (ufs_error_code != UFS_ERR_NO_ERR) {
                 return -1;
             }
@@ -312,6 +363,7 @@ ssize_t ufs_write(int fd, const char* buf, size_t size) {
             filedesc->current_block = filedesc->file->block_list;
         }
     }
+    fix_seek_past_end(filedesc);
 
     size_t written = 0;
     while (true) {
@@ -332,7 +384,7 @@ ssize_t ufs_write(int fd, const char* buf, size_t size) {
             break;
         }
         if (filedesc->current_block->next == NULL) {
-            allocate_block(filedesc);
+            extend_file(filedesc);
             if (ufs_error_code != UFS_ERR_NO_ERR) {
                 break;
             }
@@ -371,6 +423,7 @@ ssize_t ufs_read(int fd, char* buf, size_t size) {
         }
         filedesc->current_block = filedesc->file->block_list;
     }
+    fix_seek_past_end(filedesc);
 
     size_t read = 0;
     while (true) {
@@ -422,6 +475,47 @@ int ufs_delete(const char* filename) {
 
     file->is_deleted = true;
     delete_file(file);
+    return 0;
+}
+
+int ufs_resize(int fd, size_t new_size) {
+    ufs_error_code = UFS_ERR_NO_ERR;
+
+    struct filedesc* filedesc = get_filedesc(fd);
+    if (filedesc == NULL) {
+        return -1;
+    }
+    if (!filedesc->can_write) {
+        ufs_error_code = UFS_ERR_NO_PERMISSION;
+        return -1;
+    }
+    if (new_size > MAX_FILE_SIZE) {
+        ufs_error_code = UFS_ERR_NO_MEM;
+        return -1;
+    }
+
+    size_t target_block_count = new_size / BLOCK_SIZE;
+    size_t target_block_occupied = new_size % BLOCK_SIZE;
+    if (target_block_occupied != 0) {
+        ++target_block_count;
+    }
+
+    if (target_block_count > filedesc->file->block_count) {
+        allocate_blocks(filedesc->file,
+                        target_block_count - filedesc->file->block_count);
+    } else if (target_block_count < filedesc->file->block_count) {
+        free_blocks(filedesc->file,
+                    filedesc->file->block_count - target_block_count);
+        fix_seek_past_end(filedesc);
+    }
+    if (ufs_error_code != UFS_ERR_NO_ERR) {
+        return -1;
+    }
+
+    if (filedesc->current_block != NULL) {
+        filedesc->current_block->occupied = target_block_occupied;
+    }
+
     return 0;
 }
 
