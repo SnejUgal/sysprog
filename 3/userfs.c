@@ -52,6 +52,10 @@ static struct file* file_list = NULL;
 
 struct filedesc {
     struct file* file;
+
+    bool can_read;
+    bool can_write;
+
     struct block* current_block;
     int offset_in_block;
 };
@@ -164,7 +168,27 @@ int get_free_fd() {
     return min_fd;
 }
 
-void allocate_filedesc(int fd, struct file* file) {
+void allocate_filedesc(int fd, struct file* file, int flags) {
+    bool can_read = false;
+    bool can_write = false;
+
+    switch (flags & (UFS_READ_ONLY | UFS_WRITE_ONLY | UFS_READ_WRITE)) {
+    case UFS_READ_ONLY:
+        can_read = true;
+        break;
+    case UFS_WRITE_ONLY:
+        can_write = true;
+        break;
+    case 0:
+    case UFS_READ_WRITE:
+        can_read = true;
+        can_write = true;
+        break;
+    default:
+        ufs_error_code = UFS_ERR_NO_PERMISSION;
+        return;
+    }
+
     struct filedesc* filedesc = malloc(sizeof(struct filedesc));
     if (filedesc == NULL) {
         ufs_error_code = UFS_ERR_NO_MEM;
@@ -172,6 +196,8 @@ void allocate_filedesc(int fd, struct file* file) {
     }
 
     filedesc->file = file;
+    filedesc->can_read = can_read;
+    filedesc->can_write = can_write;
     filedesc->current_block = file->block_list;
     filedesc->offset_in_block = 0;
 
@@ -252,7 +278,7 @@ int ufs_open(const char* filename, int flags) {
         return -1;
     }
 
-    allocate_filedesc(free_fd, file);
+    allocate_filedesc(free_fd, file, flags);
     if (ufs_error_code != UFS_ERR_NO_ERR) {
         return -1;
     }
@@ -265,6 +291,10 @@ ssize_t ufs_write(int fd, const char* buf, size_t size) {
 
     struct filedesc* filedesc = get_filedesc(fd);
     if (filedesc == NULL) {
+        return -1;
+    }
+    if (!filedesc->can_write) {
+        ufs_error_code = UFS_ERR_NO_PERMISSION;
         return -1;
     }
 
@@ -326,6 +356,10 @@ ssize_t ufs_read(int fd, char* buf, size_t size) {
     if (filedesc == NULL) {
         return -1;
     }
+    if (!filedesc->can_read) {
+        ufs_error_code = UFS_ERR_NO_PERMISSION;
+        return -1;
+    }
 
     if (size == 0) {
         return 0;
@@ -340,7 +374,6 @@ ssize_t ufs_read(int fd, char* buf, size_t size) {
 
     size_t read = 0;
     while (true) {
-
         size_t to_read =
             filedesc->current_block->occupied - filedesc->offset_in_block;
         if (to_read > size - read) {
