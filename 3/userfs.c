@@ -16,7 +16,7 @@ static enum ufs_error_code ufs_error_code = UFS_ERR_NO_ERR;
 
 struct block {
     /** Block memory. */
-    char* memory;
+    char memory[BLOCK_SIZE];
     /** How many bytes are occupied. */
     int occupied;
     /** Next block in the file. */
@@ -119,13 +119,14 @@ void delete_file(struct file* file) {
     file->next = NULL;
 
     if (file->refs == 0) {
-        struct block* current = file->block_list;
-        while (current != NULL) {
-            struct block* next = current->next;
-            free(current->memory);
-            free(current);
-            current = next;
+        struct block* last_block = file->last_block;
+        while (last_block != NULL) {
+            struct block* previous = last_block->prev;
+            free(last_block);
+            last_block = previous;
+            --file->block_count;
         }
+        free(file->name);
         free(file);
     }
 }
@@ -149,6 +150,8 @@ int get_free_fd() {
             return -1;
         }
 
+        memset(new_descriptors + file_descriptor_capacity, 0,
+               new_capacity - file_descriptor_capacity);
         file_descriptor_capacity = new_capacity;
         file_descriptors = new_descriptors;
         min_fd = file_descriptor_count;
@@ -196,13 +199,6 @@ void allocate_block(struct filedesc* filedesc) {
     struct block* new_block = malloc(sizeof(struct block));
     if (new_block == NULL) {
         ufs_error_code = UFS_ERR_NO_MEM;
-        return;
-    }
-
-    new_block->memory = malloc(BLOCK_SIZE);
-    if (new_block->memory == NULL) {
-        ufs_error_code = UFS_ERR_NO_MEM;
-        free(new_block);
         return;
     }
 
@@ -396,4 +392,16 @@ int ufs_delete(const char* filename) {
     return 0;
 }
 
-void ufs_destroy(void) {}
+void ufs_destroy(void) {
+    for (int i = 0; i < file_descriptor_capacity; ++i) {
+        if (file_descriptors[i] != NULL) {
+            free_filedesc(i);
+        }
+    }
+
+    while (file_list != NULL) {
+        delete_file(file_list);
+    }
+
+    free(file_descriptors);
+}
