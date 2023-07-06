@@ -113,11 +113,12 @@ int get_free_fd() {
     int min_fd = 0;
 
     if (file_descriptor_count == file_descriptor_capacity) {
-        long new_capacity = file_descriptor_capacity * 2;
+        long new_capacity = (long)file_descriptor_capacity * 2;
         if (new_capacity < 16) {
             new_capacity = 16;
         }
         if (new_capacity > INT_MAX / 2) {
+            ufs_error_code = UFS_ERR_NO_MEM;
             return -1;
         }
 
@@ -129,7 +130,8 @@ int get_free_fd() {
         }
 
         memset(new_descriptors + file_descriptor_capacity, 0,
-               new_capacity - file_descriptor_capacity);
+               (new_capacity - file_descriptor_capacity) *
+                   sizeof(struct filedesc*));
         file_descriptor_capacity = new_capacity;
         file_descriptors = new_descriptors;
         min_fd = file_descriptor_count;
