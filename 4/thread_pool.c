@@ -65,7 +65,7 @@ int thread_pool_new(int max_thread_count, struct thread_pool** pool) {
 }
 
 int thread_pool_thread_count(const struct thread_pool* pool) {
-    return __atomic_load_n(&pool->thread_count, __ATOMIC_RELAXED);
+    return pool->thread_count;
 }
 
 int thread_pool_delete(struct thread_pool* pool) {
