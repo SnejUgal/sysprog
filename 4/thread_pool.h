@@ -17,6 +17,7 @@
  */
 
 #define NEED_DETACH
+#define NEED_TIMED_JOIN
 
 struct thread_pool;
 struct thread_task;

@@ -1,8 +1,11 @@
 #include "thread_pool.h"
+#include <errno.h>
 #include <pthread.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
+
+#define NS_PER_S 1000000000
 
 struct thread_task {
     thread_task_f function;
@@ -197,8 +200,13 @@ int thread_task_new(struct thread_task** task, thread_task_f function,
 
     (*task)->state = TASK_NEW;
     pthread_mutex_init(&(*task)->state_lock, NULL);
-    pthread_cond_init(&(*task)->await_finished, NULL);
     (*task)->is_detached = false;
+
+    pthread_condattr_t attributes;
+    pthread_condattr_init(&attributes);
+    pthread_condattr_setclock(&attributes, CLOCK_MONOTONIC);
+    pthread_cond_init(&(*task)->await_finished, &attributes);
+    pthread_condattr_destroy(&attributes);
 
     (*task)->pool = NULL;
     (*task)->next = NULL;
@@ -219,15 +227,14 @@ int thread_task_join(struct thread_task* task, void** result) {
         return TPOOL_ERR_TASK_NOT_PUSHED;
     }
 
+    pthread_mutex_lock(&task->state_lock);
     while (true) {
-        pthread_mutex_lock(&task->state_lock);
         if (__atomic_load_n(&task->state, __ATOMIC_RELAXED) == TASK_FINISHED) {
-            pthread_mutex_unlock(&task->state_lock);
             break;
         }
         pthread_cond_wait(&task->await_finished, &task->state_lock);
-        pthread_mutex_unlock(&task->state_lock);
     }
+    pthread_mutex_unlock(&task->state_lock);
 
     __atomic_sub_fetch(&task->pool->task_count, 1, __ATOMIC_RELAXED);
     task->pool = NULL;
@@ -242,11 +249,47 @@ int thread_task_join(struct thread_task* task, void** result) {
 
 int thread_task_timed_join(struct thread_task* task, double timeout,
                            void** result) {
-    /* IMPLEMENT THIS FUNCTION */
-    (void)task;
-    (void)timeout;
-    (void)result;
-    return TPOOL_ERR_NOT_IMPLEMENTED;
+    if (task->pool == NULL) {
+        return TPOOL_ERR_TASK_NOT_PUSHED;
+    }
+    if (timeout < 0) {
+        timeout = 0;
+    }
+
+    struct timespec wait_until;
+    clock_gettime(CLOCK_MONOTONIC, &wait_until);
+    long nsec = timeout * NS_PER_S;
+    wait_until.tv_nsec += nsec;
+    if (wait_until.tv_nsec >= NS_PER_S) {
+        wait_until.tv_sec += (wait_until.tv_nsec / NS_PER_S);
+        wait_until.tv_nsec %= NS_PER_S;
+    }
+
+    bool has_finished = false;
+    pthread_mutex_lock(&task->state_lock);
+    while (true) {
+        if (__atomic_load_n(&task->state, __ATOMIC_RELAXED) == TASK_FINISHED) {
+            has_finished = true;
+            break;
+        }
+        if (pthread_cond_timedwait(&task->await_finished, &task->state_lock,
+                                   &wait_until) == ETIMEDOUT) {
+
+            break;
+        }
+    }
+    pthread_mutex_unlock(&task->state_lock);
+    if (!has_finished) {
+        return TPOOL_ERR_TIMEOUT;
+    }
+
+    __atomic_sub_fetch(&task->pool->task_count, 1, __ATOMIC_RELAXED);
+    task->pool = NULL;
+
+    if (result != NULL) {
+        *result = task->result;
+    }
+    return 0;
 }
 
 #endif
