@@ -16,6 +16,7 @@ struct thread_task {
     } state;
     pthread_mutex_t state_lock;
     pthread_cond_t await_finished;
+    bool is_detached;
 
     struct thread_pool* pool;
     struct thread_task* next;
@@ -115,8 +116,14 @@ void* _thread_pool_worker(void* _pool) {
         task->result = task->function(task->arg);
 
         pthread_mutex_lock(&task->state_lock);
-        __atomic_store_n(&task->state, TASK_FINISHED, __ATOMIC_RELAXED);
-        pthread_cond_signal(&task->await_finished);
+        if (task->is_detached) {
+            __atomic_sub_fetch(&pool->task_count, 1, __ATOMIC_RELAXED);
+            task->pool = NULL;
+            thread_task_delete(task);
+        } else {
+            __atomic_store_n(&task->state, TASK_FINISHED, __ATOMIC_RELAXED);
+            pthread_cond_signal(&task->await_finished);
+        }
         pthread_mutex_unlock(&task->state_lock);
     }
 
@@ -191,6 +198,7 @@ int thread_task_new(struct thread_task** task, thread_task_f function,
     (*task)->state = TASK_NEW;
     pthread_mutex_init(&(*task)->state_lock, NULL);
     pthread_cond_init(&(*task)->await_finished, NULL);
+    (*task)->is_detached = false;
 
     (*task)->pool = NULL;
     (*task)->next = NULL;
@@ -257,9 +265,23 @@ int thread_task_delete(struct thread_task* task) {
 #ifdef NEED_DETACH
 
 int thread_task_detach(struct thread_task* task) {
-    /* IMPLEMENT THIS FUNCTION */
-    (void)task;
-    return TPOOL_ERR_NOT_IMPLEMENTED;
+    if (task->pool == NULL) {
+        return TPOOL_ERR_TASK_NOT_PUSHED;
+    }
+
+    pthread_mutex_lock(&task->state_lock);
+    if (__atomic_load_n(&task->state, __ATOMIC_RELAXED) == TASK_FINISHED) {
+        pthread_mutex_unlock(&task->state_lock);
+        __atomic_sub_fetch(&task->pool->task_count, 1, __ATOMIC_RELAXED);
+        task->pool = NULL;
+        thread_task_delete(task);
+        return 0;
+    }
+
+    task->is_detached = true;
+    pthread_mutex_unlock(&task->state_lock);
+
+    return 0;
 }
 
 #endif

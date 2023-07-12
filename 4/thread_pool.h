@@ -16,6 +16,8 @@
  * used by tests.
  */
 
+#define NEED_DETACH
+
 struct thread_pool;
 struct thread_task;
 
