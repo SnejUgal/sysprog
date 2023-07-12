@@ -120,13 +120,14 @@ void* _thread_pool_worker(void* _pool) {
 
         pthread_mutex_lock(&task->state_lock);
         if (task->is_detached) {
+            pthread_mutex_unlock(&task->state_lock);
             __atomic_sub_fetch(&pool->task_count, 1, __ATOMIC_RELAXED);
             task->pool = NULL;
             thread_task_delete(task);
-        } else {
-            __atomic_store_n(&task->state, TASK_FINISHED, __ATOMIC_RELAXED);
-            pthread_cond_signal(&task->await_finished);
+            continue;
         }
+        __atomic_store_n(&task->state, TASK_FINISHED, __ATOMIC_RELAXED);
+        pthread_cond_signal(&task->await_finished);
         pthread_mutex_unlock(&task->state_lock);
     }
 
