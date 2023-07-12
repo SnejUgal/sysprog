@@ -69,11 +69,12 @@ int thread_pool_thread_count(const struct thread_pool* pool) {
 }
 
 int thread_pool_delete(struct thread_pool* pool) {
-    if (__atomic_load_n(&pool->task_count, __ATOMIC_ACQUIRE) > 0) {
+    pthread_mutex_lock(&pool->tasks_lock);
+    if (pool->task_count > 0) {
+        pthread_mutex_unlock(&pool->tasks_lock);
         return TPOOL_ERR_HAS_TASKS;
     }
 
-    pthread_mutex_lock(&pool->tasks_lock);
     pool->should_shutdown = true;
     pthread_cond_broadcast(&pool->await_task);
     pthread_mutex_unlock(&pool->tasks_lock);
@@ -121,7 +122,11 @@ void* _thread_pool_worker(void* _pool) {
         pthread_mutex_lock(&task->state_lock);
         if (task->is_detached) {
             pthread_mutex_unlock(&task->state_lock);
-            __atomic_sub_fetch(&pool->task_count, 1, __ATOMIC_ACQ_REL);
+
+            pthread_mutex_lock(&pool->tasks_lock);
+            --pool->task_count;
+            pthread_mutex_unlock(&pool->tasks_lock);
+
             task->pool = NULL;
             thread_task_delete(task);
             continue;
@@ -159,17 +164,16 @@ int thread_pool_push_task(struct thread_pool* pool, struct thread_task* task) {
         }
     }
 
-    if (__atomic_load_n(&pool->task_count, __ATOMIC_RELAXED) ==
-        TPOOL_MAX_TASKS) {
+    pthread_mutex_lock(&pool->tasks_lock);
+    if (pool->task_count == TPOOL_MAX_TASKS) {
+        pthread_mutex_unlock(&pool->tasks_lock);
         return TPOOL_ERR_TOO_MANY_TASKS;
     }
-    size_t task_count =
-        __atomic_add_fetch(&pool->task_count, 1, __ATOMIC_ACQ_REL);
+    ++pool->task_count;
 
     task->pool = pool;
     task->state = TASK_NEW;
 
-    pthread_mutex_lock(&pool->tasks_lock);
     struct thread_task* previous = pool->tasks_back;
     pool->tasks_back = task;
     if (previous != NULL) {
@@ -179,7 +183,7 @@ int thread_pool_push_task(struct thread_pool* pool, struct thread_task* task) {
         pool->tasks_front = task;
     }
 
-    if (task_count > pool->thread_count) {
+    if (pool->task_count > pool->thread_count) {
         _thread_pool_start_thread(pool);
     }
     pthread_cond_signal(&pool->await_task);
@@ -237,7 +241,9 @@ int thread_task_join(struct thread_task* task, void** result) {
     }
     pthread_mutex_unlock(&task->state_lock);
 
-    __atomic_sub_fetch(&task->pool->task_count, 1, __ATOMIC_ACQ_REL);
+    pthread_mutex_lock(&task->pool->tasks_lock);
+    --task->pool->task_count;
+    pthread_mutex_unlock(&task->pool->tasks_lock);
     task->pool = NULL;
 
     if (result != NULL) {
@@ -284,7 +290,9 @@ int thread_task_timed_join(struct thread_task* task, double timeout,
         return TPOOL_ERR_TIMEOUT;
     }
 
-    __atomic_sub_fetch(&task->pool->task_count, 1, __ATOMIC_ACQ_REL);
+    pthread_mutex_lock(&task->pool->tasks_lock);
+    --task->pool->task_count;
+    pthread_mutex_unlock(&task->pool->tasks_lock);
     task->pool = NULL;
 
     if (result != NULL) {
@@ -316,7 +324,11 @@ int thread_task_detach(struct thread_task* task) {
     pthread_mutex_lock(&task->state_lock);
     if (__atomic_load_n(&task->state, __ATOMIC_RELAXED) == TASK_FINISHED) {
         pthread_mutex_unlock(&task->state_lock);
-        __atomic_sub_fetch(&task->pool->task_count, 1, __ATOMIC_ACQ_REL);
+
+        pthread_mutex_lock(&task->pool->tasks_lock);
+        --task->pool->task_count;
+        pthread_mutex_unlock(&task->pool->tasks_lock);
+
         task->pool = NULL;
         thread_task_delete(task);
         return 0;
