@@ -112,8 +112,12 @@ int chat_client_process_message(struct chat_client* client) {
     client->from_server.start += strlen(message) + 1;
 
     char* author = strsep(&message, "\n");
-    chat_messages_push(&client->messages, chat_message_new(author, message));
+    if (message == NULL) {
+        // bad message from server
+        return 0;
+    }
 
+    chat_messages_push(&client->messages, chat_message_new(author, message));
     return 0;
 }
 

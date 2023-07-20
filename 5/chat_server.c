@@ -31,6 +31,7 @@ struct chat_server {
     size_t peer_count;
 
     struct chat_messages messages;
+    struct buffer my_message;
 };
 
 int chat_peer_process_message(struct chat_peer* peer,
@@ -91,6 +92,7 @@ struct chat_server* chat_server_new(void) {
     server->peer_count = 0;
 
     server->messages = chat_messages_new();
+    server->my_message = buffer_new();
 
     return server;
 }
@@ -109,6 +111,7 @@ void chat_server_delete(struct chat_server* server) {
     free(server->peers);
 
     chat_messages_delete(&server->messages);
+    buffer_delete(&server->my_message);
     free(server);
 }
 
@@ -270,25 +273,7 @@ int chat_server_update(struct chat_server* server, double timeout) {
 }
 
 int chat_server_get_descriptor(const struct chat_server* server) {
-#if NEED_SERVER_FEED
-    /* IMPLEMENT THIS FUNCTION if want +5 points. */
-
-    /*
-     * Server has multiple sockets - own and from connected clients. Hence
-     * you can't return a socket here. But if you are using epoll/kqueue,
-     * then you can return their descriptor. These descriptors can be polled
-     * just like sockets and will return an event when any of their owned
-     * descriptors has any events.
-     *
-     * For example, assume you created an epoll descriptor and added to
-     * there a listen-socket and a few client-sockets. Now if you will call
-     * poll() on the epoll's descriptor, then on return from poll() you can
-     * be sure epoll_wait() can return something useful for some of those
-     * sockets.
-     */
-#endif
-    (void)server;
-    return -1;
+    return server->epoll;
 }
 
 int chat_server_get_socket(const struct chat_server* server) {
@@ -313,11 +298,38 @@ int chat_server_get_events(const struct chat_server* server) {
 
 int chat_server_feed(struct chat_server* server, const char* msg,
                      uint32_t msg_size) {
-#if NEED_SERVER_FEED
-    /* IMPLEMENT THIS FUNCTION if want +5 points. */
-#endif
-    (void)server;
-    (void)msg;
-    (void)msg_size;
-    return CHAT_ERR_NOT_IMPLEMENTED;
+
+    buffer_push(&server->my_message, msg, msg_size);
+    for (size_t i = server->my_message.start; i < server->my_message.size;
+         ++i) {
+        switch (server->my_message.buffer[i]) {
+        case '\n':
+            server->my_message.buffer[i] = '\0';
+            break;
+        }
+    }
+
+    int result = 0;
+    while (buffer_has_string(&server->my_message)) {
+        char* message = server->my_message.buffer + server->my_message.start;
+        size_t message_size = strlen(message) + 1;
+        server->my_message.start += message_size;
+
+        for (size_t i = 0; i < server->peer_count; ++i) {
+            struct chat_peer* peer = server->peers[i];
+
+            buffer_push(&peer->to_peer, "server\n", strlen("server\n"));
+            buffer_push(&peer->to_peer, message, message_size);
+            if ((peer->event.events & EPOLLOUT) != 0) {
+                continue;
+            }
+            peer->event.events |= EPOLLOUT;
+            if (epoll_ctl(server->epoll, EPOLL_CTL_MOD, peer->socket,
+                          &peer->event) == -1) {
+                result = CHAT_ERR_SYS;
+            }
+        }
+    }
+
+    return result;
 }
