@@ -14,6 +14,9 @@ struct chat_message* chat_message_new(const char* author, const char* data) {
     }
     message->author = strdup(author);
     message->data = strdup(data);
+    if (message->author == NULL || message->data == NULL) {
+        abort();
+    }
     return message;
 }
 

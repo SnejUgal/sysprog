@@ -42,6 +42,9 @@ int chat_peer_process_message(struct chat_peer* peer,
 
     if (peer->name == NULL) {
         peer->name = strdup(message);
+        if (peer->name == NULL) {
+            abort();
+        }
         return 0;
     }
 

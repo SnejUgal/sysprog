@@ -52,6 +52,9 @@ int chat_client_connect(struct chat_client* client, const char* addr) {
     }
 
     char* port = strdup(addr);
+    if (port == NULL) {
+        abort();
+    }
     char* node = strsep(&port, ":");
 
     struct addrinfo hints;
