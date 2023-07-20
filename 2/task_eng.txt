@@ -50,8 +50,18 @@ Rules:
 - When something is unclear how it should work, you should test it
   in the real console like /bin/bash and repeat the behaviour.
 
+- The code should be built successfully with these compiler flags:
+  `-Wextra -Werror -Wall -Wno-gnu-folding-constant`.
+
 
 Restrictions:
+
+- Global variables are not allowed (except for the already
+  existing ones).
+
+- Memory leaks are not allowed. To check them you can use
+  utils/heap_help tool. Showing zero leak reports from Valgrind or
+  ASAN is not enough - they often miss the leaks.
 
 - Length of command line input is not limited, so you can't read
   it into a buffer of a fixed size. But each line obviously fits

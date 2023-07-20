@@ -18,8 +18,21 @@ Rules:
 - Files have ASCII encoding. I.e. they are plain text. Not unicode
   or anything.
 
+- For time measurements you should use
+  clock_gettime(CLOCK_MONOTONIC). Non-monotonic clocks (such as
+  time(), gettimeofday(), CLOCK_REALTIME, etc) can go backwards
+  sometimes, screwing the time measurements. clock() is monotonic,
+  but doesn't account time spent in blocking syscalls.
+
 
 Restrictions:
+
+- Global variables are not allowed (except for the already
+  existing ones).
+
+- Memory leaks are not allowed. To check them you can use
+  utils/heap_help tool. Showing zero leak reports from Valgrind or
+  ASAN is not enough - they often miss the leaks.
 
 - Sorting should be implemented by you without built-in functions
   like qsort(), system("sort ...") etc.
