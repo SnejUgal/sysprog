@@ -1,5 +1,7 @@
 #pragma once
 
+#define NEED_AUTHOR 1
+
 enum chat_errcode {
 	CHAT_ERR_INVALID_ARGUMENT = 1,
 	CHAT_ERR_TIMEOUT,

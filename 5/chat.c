@@ -4,6 +4,7 @@
 #include <stdlib.h>
 
 void chat_message_delete(struct chat_message* msg) {
+    free((void*)msg->author);
     free(msg->data);
     free(msg);
 }
