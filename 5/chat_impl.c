@@ -48,6 +48,7 @@ void chat_messages_push(struct chat_messages* messages,
         messages->start = 0;
         messages->end = messages->capacity;
         messages->capacity = new_capacity;
+        free(messages->messages);
         messages->messages = new_messages;
     }
 
