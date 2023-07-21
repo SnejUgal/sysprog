@@ -352,6 +352,7 @@ test_multi_client(void)
 			if (chat_client_update(clis[i], 0) == 0)
 				have_events = true;
 		}
+                sched_yield();
 		if (chat_server_update(s, 0) == 0)
 			have_events = true;
 		if (!have_events)
@@ -384,6 +385,8 @@ test_multi_client(void)
 		// -1 because own messages are not delivered to self.
 		int total_msg_count = msg_count * (client_count - 1);
 		for (int mi = 0; mi < total_msg_count; ++mi) {
+			int rc = chat_client_update(cli, 0);
+			unit_fail_if(rc != 0 && rc != CHAT_ERR_TIMEOUT);
 			struct chat_message *msg = chat_client_pop_next(cli);
 			unit_fail_if(msg == NULL);
 			int cli_id = -1;
@@ -420,6 +423,7 @@ struct test_stress_ctx {
 	int thread_idx;
 	uint16_t port;
 	bool is_running;
+        pthread_barrier_t connect;
 };
 
 static void *
@@ -433,6 +437,7 @@ test_stress_worker_f(void *arg)
 	sprintf(name, "cli_%d", thread_idx);
 	struct chat_client *cli = chat_client_new(name);
 	unit_fail_if(chat_client_connect(cli, make_addr_str(ctx->port)) != 0);
+        pthread_barrier_wait(&ctx->connect);
 	for (int i = 0; i < ctx->msg_count; ++i) {
 		test_msg_set_id(test_msg, thread_idx, i);
 		unit_fail_if(chat_client_feed(cli,
@@ -454,7 +459,10 @@ test_stress_worker_f(void *arg)
 		chat_message_extract_id(msg, &cli_id, &msg_id);
 		unit_fail_if(cli_id > ctx->client_count || cli_id < 0);
 		unit_fail_if(msg_id > ctx->msg_count || msg_id < 0);
-		unit_fail_if(msg_counts[cli_id] != msg_id);
+                if (msg_counts[cli_id] != msg_id) {
+                    printf("%d != %d\n", msg_counts[cli_id], msg_id);
+                    unit_fail_if(msg_counts[cli_id] != msg_id);
+                }
 		++msg_counts[cli_id];
 
 		char name[128];
@@ -472,7 +480,6 @@ test_stress_worker_f(void *arg)
 		unit_fail_if(rc != 0 && rc != CHAT_ERR_TIMEOUT);
 	}
 	chat_client_delete(cli);
-	test_msg_delete(test_msg);
 	return NULL;
 }
 
@@ -492,6 +499,7 @@ test_stress(void)
 	ctx.thread_idx = 0;
 	ctx.port = server_get_port(s);
 	ctx.is_running = true;
+        pthread_barrier_init(&ctx.connect, NULL, client_count);
 
 	unit_msg("Start client threads");
 	pthread_t threads[client_count];
@@ -524,6 +532,12 @@ test_stress(void)
 
 		chat_message_delete(msg);
 	}
+        while ((chat_server_get_events(s) & CHAT_EVENT_OUTPUT) != 0) {
+            int rc = chat_server_update(s, 0.1);
+	    unit_fail_if(rc != 0 && rc != CHAT_ERR_TIMEOUT);
+        }
+        // should not receive any spurious messages
+        unit_fail_if(chat_server_pop_next(s) != NULL);
 	free(msg_counts);
 	test_msg_delete(test_msg);
 	unit_msg("Clean up the clients");
@@ -534,6 +548,7 @@ test_stress(void)
 		unit_fail_if(rc != 0);
 	}
 	chat_server_delete(s);
+        pthread_barrier_destroy(&ctx.connect);
 
 	unit_test_finish();
 }
